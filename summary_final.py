@@ -1,4 +1,5 @@
 import json
+import requests
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
@@ -7,28 +8,42 @@ import pydeck as pdk
 st.set_page_config(layout="wide")
 
 # =========================
+# S3 URL CONFIG
+# =========================
+LOG_URL = "https://website-onecharge.s3.ap-southeast-1.amazonaws.com/analysis/pugev.status_logs_v2.json"
+STATION_URL = "https://website-onecharge.s3.ap-southeast-1.amazonaws.com/analysis/station_202602182357.json"
+
+# =========================
+# CACHE LOAD FUNCTIONS
+# =========================
+@st.cache_data(show_spinner=True)
+def load_log_data():
+    response = requests.get(LOG_URL)
+    return response.json()
+
+@st.cache_data(show_spinner=True)
+def load_station_data():
+    response = requests.get(STATION_URL)
+    return response.json()
+
+# =========================
 # HEADER
 # =========================
-st.markdown("# ⚡ EV Charging  Dashboard")
+st.markdown("# ⚡ EV Charging Dashboard")
 st.caption("Analytics Report")
 
 # =========================
-# LOAD LOG DATA
+# LOAD DATA FROM S3
 # =========================
-with open("pugev.status_logs_v2.json", "r", encoding="utf-8") as f:
-    data = json.load(f)
-
+data = load_log_data()
 df = pd.json_normalize(data)
 
-# =========================
-# LOAD STATION MASTER
-# =========================
-with open("station_202602182357.json", "r", encoding="utf-8") as f:
-    station_data = json.load(f)
-
+station_data = load_station_data()
 station_df = pd.json_normalize(station_data["station"])
 
-# parse name_obj
+# =========================
+# PARSE STATION NAME
+# =========================
 station_df["name_parsed"] = station_df["name_obj"].apply(json.loads)
 station_df["station_name"] = station_df["name_parsed"].apply(
     lambda x: x.get("th") if x.get("th") else x.get("en")
@@ -157,18 +172,17 @@ k3.metric("Avg Effective Power (kW)", round(filtered_df["effective_power"].mean(
 k4.metric("Max Power (kW)", round(filtered_df["effective_power"].max(), 2))
 
 st.divider()
+
 # =========================
-# DAILY AVERAGE BY WEEKDAY
+# WEEKDAY AVERAGE
 # =========================
 st.markdown("## 📅 Average Charging by Weekday (Mon–Sun)")
 
-# เรียงลำดับวัน
 weekday_order = [
     "Monday","Tuesday","Wednesday",
     "Thursday","Friday","Saturday","Sunday"
 ]
 
-# คำนวณจำนวน session ต่อวันจริงก่อน
 daily_counts = (
     filtered_df
     .groupby(["weekday_name", "date"])
@@ -176,7 +190,6 @@ daily_counts = (
     .reset_index(name="sessions")
 )
 
-# ค่าเฉลี่ย session ต่อวันของแต่ละ weekday
 weekday_avg_sessions = (
     daily_counts
     .groupby("weekday_name")["sessions"]
@@ -184,7 +197,6 @@ weekday_avg_sessions = (
     .reindex(weekday_order)
 )
 
-# ค่าเฉลี่ย duration ต่อ weekday
 weekday_avg_duration = (
     filtered_df
     .groupby("weekday_name")["duration_hour"]
@@ -192,7 +204,6 @@ weekday_avg_duration = (
     .reindex(weekday_order)
 )
 
-# ค่าเฉลี่ย power ต่อ weekday
 weekday_avg_power = (
     filtered_df
     .groupby("weekday_name")["effective_power"]
@@ -200,117 +211,60 @@ weekday_avg_power = (
     .reindex(weekday_order)
 )
 
-# รวมเป็น DataFrame
 weekday_summary_df = pd.DataFrame({
     "Avg Sessions / Day": weekday_avg_sessions,
     "Avg Duration (hrs)": weekday_avg_duration,
     "Avg Power (kW)": weekday_avg_power
 }).round(2)
 
-# แสดงตาราง
 st.dataframe(weekday_summary_df)
 
 st.divider()
 
 # =========================
-# WEEKDAY CHART
-# =========================
-st.markdown("### 📊 Average Sessions per Day by Weekday")
-
-fig_weekday = plt.figure(figsize=(10,4))
-weekday_avg_sessions.plot(kind="bar")
-plt.title("Average Sessions per Day")
-plt.xticks(rotation=45)
-plt.grid(axis="y", linestyle="--", alpha=0.3)
-st.pyplot(fig_weekday)
-
-
-# =========================
-# STATION SUMMARY
-# =========================
-st.markdown("## 🏢 Station Summary")
-
-station_summary = (
-    filtered_df
-    .groupby("station_name")
-    .agg(
-        sessions=("station_id", "count"),
-        avg_duration=("duration_hour", "mean"),
-        avg_power=("effective_power", "mean")
-    )
-    .sort_values("sessions", ascending=False)
-)
-
-st.dataframe(station_summary)
-
-st.divider()
-
-# =========================
-# CHART GRID (เหมือน UI เดิม)
-# =========================
-st.markdown("## 📊 Charging Analysis")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    fig1 = plt.figure(figsize=(8,4))
-    filtered_df.groupby("start_hour").size().plot(kind="bar")
-    plt.title("Sessions by Hour")
-    plt.grid(axis="y", linestyle="--", alpha=0.3)
-    st.pyplot(fig1)
-
-with col2:
-    fig2 = plt.figure(figsize=(8,4))
-    filtered_df.groupby("region").size().plot(kind="bar")
-    plt.title("Sessions by Region")
-    plt.grid(axis="y", linestyle="--", alpha=0.3)
-    st.pyplot(fig2)
-
-st.divider()
-
-# =========================
-# ADVANCED HEATMAP (DENSITY + STATION)
-# =========================
-
-# รวมจำนวน session ต่อพิกัด
-map_df = (
-    filtered_df
-    .groupby(["station_name", "latitude", "longitude"])
-    .size()
-    .reset_index(name="sessions")
-)
-
-# =========================
-# HEATMAP
+# SAFE HEATMAP VERSION
 # =========================
 st.markdown("## 🔥 Charging Activity Heat Map")
 
-heatmap_data = filtered_df[["latitude", "longitude"]]
+# เตรียมข้อมูล map แบบปลอดภัย
+map_df = filtered_df[["latitude", "longitude"]].dropna().copy()
 
-layer = pdk.Layer(
-    "HeatmapLayer",
-    data=heatmap_data,
-    get_position=["longitude", "latitude"],
-    radiusPixels=60,
-)
+# แปลงเป็น python float จริง ๆ
+map_df["latitude"] = map_df["latitude"].apply(lambda x: float(x))
+map_df["longitude"] = map_df["longitude"].apply(lambda x: float(x))
 
-view_state = pdk.ViewState(
-    latitude=filtered_df["latitude"].mean(),
-    longitude=filtered_df["longitude"].mean(),
-    zoom=5,
-)
+# แปลงเป็น list dict (JSON safe)
+map_data = map_df.to_dict(orient="records")
 
-deck = pdk.Deck(
-    layers=[layer],
-    initial_view_state=view_state,
-)
+if len(map_data) > 0:
 
-st.pydeck_chart(deck)
+    heat_layer = pdk.Layer(
+        "HeatmapLayer",
+        data=map_data,
+        get_position=["longitude", "latitude"],
+        radiusPixels=60,
+    )
+
+    view_state = pdk.ViewState(
+        latitude=float(map_df["latitude"].mean()),
+        longitude=float(map_df["longitude"].mean()),
+        zoom=6,
+    )
+
+    deck = pdk.Deck(
+        layers=[heat_layer],
+        initial_view_state=view_state,
+    )
+
+    st.pydeck_chart(deck)
+
+else:
+    st.warning("No map data available")
 
 
 
 # =========================
-# SESSION LIST PER STATION
+# SESSION LIST
 # =========================
 st.markdown("## 📋 Charging Sessions Detail")
 
